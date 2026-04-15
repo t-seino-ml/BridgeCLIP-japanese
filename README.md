@@ -1,4 +1,61 @@
-# 橋梁点検画像の分類・検索のためのCLIPファインチューニング
+# BridgeCLIP: Fine-tuned CLIP for Bridge Inspection Image Classification and Retrieval
+
+A fine-tuned [OpenCLIP ViT-B/32](https://github.com/mlfoundations/open_clip) model for bridge inspection image classification and image-text retrieval, trained on the Japanese national road facility inspection database (xROAD).
+
+## Overview
+
+- **Proposed method**: CLIP fine-tuning + k-NN classification (k=10, cosine similarity)
+- **Baselines**: ResNet50, ViT-B/16 (supervised), GPT-4o, Qwen3-VL, InternVL3, Llama3.2-Vision (zero-shot)
+- **Tasks**: 4-category multi-label classification (Soundness / Countermeasure / Damage Type / Damage Location), Image-Text retrieval (I2T / T2I / I2I)
+
+## Performance
+
+### Classification (Exact Match Accuracy, k=10 k-NN)
+
+| Category | Accuracy |
+|---|---|
+| Soundness | 0.7361 |
+| Countermeasure | 0.6186 |
+| Damage Type | 0.6209 |
+| Damage Location | 0.5740 |
+| **Mean** | **0.6374** |
+
+### Retrieval (Recall@k)
+
+| Task | R@1 | R@5 | R@10 |
+|---|---|---|---|
+| Image-to-Text | 0.0362 | 0.1437 | 0.2266 |
+| Text-to-Image | 0.0493 | 0.1620 | 0.2437 |
+
+## Model
+
+Fine-tuned checkpoint is available on Hugging Face Hub:
+
+> [**Seino404/bridge-inspection-clip**](https://huggingface.co/Seino404/bridge-inspection-clip)
+
+## Dataset
+
+Image-text pairs from the Japanese national road facility inspection database (xROAD).
+
+| Split | Samples |
+|---|---|
+| Train | 130,930 |
+| Test | 2,679 |
+| k-NN DB (all 4 categories valid) | 90,987 |
+
+## Citation
+
+Coming soon (paper in preparation).
+
+## License
+
+MIT License
+
+---
+
+# 日本語版 / Japanese
+
+# BridgeCLIP: 橋梁点検画像の分類・検索のためのCLIPファインチューニング
 
 橋梁点検画像と変状所見テキストのペアデータを用いて [OpenCLIP (ViT-B/32)](https://github.com/mlfoundations/open_clip) をコントラスティブ学習でファインチューニングし、k近傍分類および画像-テキスト検索を行う手法の実装です。
 
@@ -65,7 +122,6 @@ open_clip_train \
     --val-data path/to/val.csv \
     --csv-img-key image \
     --csv-caption-key text \
-    --epochs 100 \
     --batch-size 128 \
     --lr 1e-4 \
     --warmup 1000
@@ -92,7 +148,7 @@ python -m classification.train \
     --train_csv path/to/labeled_train.csv \
     --val_csv   path/to/labeled_val.csv \
     --out_dir   results/resnet50_finetune \
-    --epochs 30 --lr 1e-4 --batch_size 32
+    --lr 1e-4 --batch_size 32
 
 # ViT finetune
 python -m classification.train \
@@ -100,7 +156,7 @@ python -m classification.train \
     --train_csv path/to/labeled_train.csv \
     --val_csv   path/to/labeled_val.csv \
     --out_dir   results/vit_finetune \
-    --epochs 30 --lr 5e-5 --batch_size 32
+    --lr 5e-5 --batch_size 32
 ```
 
 #### VLM ゼロショット分類
@@ -142,7 +198,7 @@ python -m classification.retrieval_eval \
 
 ファインチューニング済みチェックポイントは Hugging Face Hub で公開しています:
 
-> [**your-username/bridgeclip-vit-b-32**](https://huggingface.co/your-username/bridgeclip-vit-b-32)
+> [**Seino404/bridge-inspection-clip**](https://huggingface.co/Seino404/bridge-inspection-clip)
 
 ## データセット
 
@@ -153,6 +209,10 @@ python -m classification.retrieval_eval \
 | 学習データ | 130,930 |
 | テストデータ | 2,679 |
 | kNN DB（4カテゴリ有効） | 90,987 |
+
+## 引用
+
+論文準備中のため、今後公開予定です。
 
 ## ライセンス
 
