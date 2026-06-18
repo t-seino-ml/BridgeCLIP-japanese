@@ -17,7 +17,7 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
-from classification.data.labels import (
+from classification.data.label_definitions import (
     KENZENUDO_LABELS,
     TAISAKU_LABELS,
     DAMAGE_TYPE_LABELS,

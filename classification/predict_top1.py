@@ -30,7 +30,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from classification.data.dataset import BridgeInspectionDataset
-from classification.data.labels import ALL_LABEL_SETS
+from classification.data.label_definitions import ALL_LABEL_SETS
 from classification.models.resnet50 import build_resnet50
 from classification.models.resnet50_weighted import build_resnet50_weighted
 from classification.models.vit import build_vit

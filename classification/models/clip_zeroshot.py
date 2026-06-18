@@ -27,8 +27,8 @@ import torch.nn.functional as F
 from PIL import Image
 from tqdm import tqdm
 
-from classification.data.labels import ALL_LABEL_SETS
-from classification.prompts_unified import CLIP_TEMPLATES
+from classification.data.label_definitions import ALL_LABEL_SETS
+from classification.prompts import CLIP_TEMPLATES
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 

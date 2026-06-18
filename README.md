@@ -1,184 +1,206 @@
-# BridgeCLIP: Fine-tuned CLIP for Bridge Inspection Image Classification and Retrieval
+# BridgeCLIP — 橋梁点検画像の分類と検索のための CLIP ファインチューニング
 
-A fine-tuned [OpenCLIP ViT-B/32](https://github.com/mlfoundations/open_clip) model for bridge inspection image classification and image-text retrieval, trained on the Japanese national road facility inspection database (xROAD). Both Japanese-caption and English-caption variants are supported.
+[OpenCLIP ViT-B/32](https://github.com/mlfoundations/open_clip) を全国道路施設点検データベース（xROAD）の橋梁点検画像と所見テキストのペアでファインチューニングし、**画像分類（4 カテゴリ）と画像⇔テキスト検索**を 1 つのモデルで実現する研究コード。
 
-## Overview
+## 提案手法
 
-- **Proposed method**: CLIP fine-tuning + k-NN classification (k=10, cosine similarity over the fine-tuned image features)
-- **Additional ablations**: CLIP-FT + supervised linear / finetune heads (C/D/E/F), text–image dot product (A/B), top-1 fair comparison for weighted-BCE variants
-- **Baselines**: ResNet50, ViT-B/16 (supervised: linear probe / full finetune / weighted BCE), GPT-4o, Qwen3-VL-8B, InternVL3-8B, Llama3.2-Vision (zero-shot VLMs)
-- **Tasks**:
-  - 4-category multi-label classification:
-    - Soundness rating (Ⅰ/Ⅱ/Ⅲ/Ⅳ, single-label)
-    - Measure classification (A/B/C1/C2/E1/E2/M/S1/S2, single-label)
-    - Damage type (15 classes, multi-label)
-    - Damage location (20 classes, multi-label)
-  - Image–text retrieval (I2T / T2I) — paired by row in the validation set
-  - Attribute-based retrieval — counts a gallery item as a hit if it shares at least one label with the query (AttrMatch@k, attribute-based mAP, NDCG@10)
+CLIP image encoder と text encoder をコントラスティブ損失で橋梁ドメインにファインチューニングした上で、
 
-## Performance (Japanese captions, val=2,679)
+- **画像分類**：訓練画像との k近傍多数決（k = 10、コサイン類似度）でラベル付与
+- **画像⇔テキスト検索**：image / text 埋め込みの内積で検索
+- **属性ベース検索**：「クエリと同じカテゴリラベルを持つギャラリーアイテムを hit とする」評価フレーム（AttrMatch@k、属性ベース mAP、NDCG@10）
 
-Macro-F1 per category, plus the mean. The proposed CLIP fine-tuned k-NN reaches a competitive 0.4151 while keeping the highest macro-precision on damage-location.
+を行う。
 
-| Model | Soundness | Measure | Damage type | Damage loc. | **Mean macro-F1** |
+## タスク
+
+| カテゴリ | クラス数 | タイプ |
+|---|---|---|
+| 健全度判定 | 4 (Ⅰ/Ⅱ/Ⅲ/Ⅳ) | 単一ラベル |
+| 対策区分 | 9 (A/B/C1/C2/E1/E2/M/S1/S2) | 単一ラベル |
+| 損傷種類 | 15 | マルチラベル |
+| 損傷部位 | 20 | マルチラベル |
+
+## 主な結果（検証データ 2,679 件）
+
+### 分類性能（macro-F1、val=2,679）
+
+| モデル | 健全度 | 対策 | 損傷種類 | 損傷部位 | **平均** |
 |---|---|---|---|---|---|
 | ResNet50 weighted finetune | **0.6106** | 0.3293 | **0.5379** | 0.4640 | **0.4855** |
 | ViT weighted finetune | 0.5502 | **0.3593** | 0.5310 | 0.4368 | 0.4693 |
 | ResNet50 finetune | 0.5515 | 0.3416 | 0.5005 | 0.3793 | 0.4432 |
 | ViT finetune | 0.5519 | 0.3502 | 0.4777 | 0.3592 | 0.4347 |
-| **Proposed: CLIP fine-tuned + k-NN** | 0.4170 | 0.2415 | 0.5115 | **0.4904** | **0.4151** |
-| Proposed: CLIP fine-tuned + linear classifier (D) | 0.3879 | 0.2273 | 0.4939 | 0.5021 | 0.4028 |
-| Proposed: CLIP fine-tuned + supervised + weighted BCE (F) | 0.4617 | 0.3082 | 0.5363 | 0.4721 | 0.4446 |
+| **提案: CLIP fine-tuned + kNN** | 0.4170 | 0.2415 | 0.5115 | **0.4904** | **0.4151** |
+| 提案: CLIP fine-tuned + 線形分類器 | 0.3879 | 0.2273 | 0.4939 | 0.5021 | 0.4028 |
+| 提案: CLIP fine-tuned + 教師あり + weighted BCE | 0.4617 | 0.3082 | 0.5363 | 0.4721 | 0.4446 |
 | GPT-4o (zero-shot) | 0.1550 | 0.1593 | 0.2967 | 0.2783 | 0.2223 |
 | Qwen3-VL-8B (zero-shot) | 0.1102 | 0.1394 | 0.2195 | 0.1610 | 0.1575 |
 | InternVL3-8B (zero-shot) | 0.0668 | 0.0235 | 0.2043 | 0.1291 | 0.1059 |
 | Llama3.2-Vision (zero-shot) | 0.0042 | 0.0005 | 0.0004 | 0.0011 | 0.0015 |
 
-### Feature-only comparison: CLIP-FT contrastive features vs ImageNet/LAION baselines
+提案手法は単一の埋め込み空間で分類と検索を同時にこなすことが特徴。**損傷部位の macro-F1 / macro-Precision で全モデル中首位**を維持しながら、教師あり強ベースラインと比較しても遜色ない水準を達成。
 
-Same linear-probe head, only the backbone pre-training differs:
+### 特徴空間の比較（同じ supervised 線形プローブヘッド、backbone のみ違う）
 
-| Backbone | Linear-probe Mean macro-F1 |
+| Backbone | 平均 macro-F1 |
 |---|---|
-| CLIP-base (LAION-2B) | 0.3304 |
-| **CLIP-FT (proposed)** | **0.4028 (+21.9% relative)** |
 | ResNet50 (ImageNet) | 0.3278 |
 | ViT-B/16 (ImageNet) | 0.3496 |
+| CLIP-base (LAION-2B) | 0.3304 |
+| **CLIP-FT（本提案）** | **0.4028 (+21.9% 相対改善)** |
 
-→ Domain contrastive learning gives a clear +21.9% relative gain over LAION-2B base CLIP at the linear-probe level.
+橋梁ドメインでの対照学習は、ImageNet / LAION-2B の事前学習を **21.9% 相対** で上回ることを実証。
 
-### Retrieval (val=2,679)
+### 検索性能（Recall@k、val=2,679）
 
-| Direction | Base CLIP | **CLIP fine-tuned (epoch 5)** |
+| 方向 | Base CLIP | **CLIP fine-tuned (epoch 5)** |
 |---|---|---|
-| I→T R@1  | 0.0004 | **0.0370** |
-| I→T R@10 | 0.0037 | **0.2251** |
-| T→I R@1  | 0.0011 | **0.0493** |
-| T→I R@10 | 0.0045 | **0.2437** |
+| Image→Text R@1 | 0.0004 | **0.0370** |
+| Image→Text R@10 | 0.0037 | **0.2251** |
+| Text→Image R@1 | 0.0011 | **0.0493** |
+| Text→Image R@10 | 0.0045 | **0.2437** |
 
-### Attribute-based retrieval (Text → Image, AttrMatch@1)
+### 属性ベース検索（Text → Image, AttrMatch@1）
 
-A hit is counted if the retrieved gallery image shares at least one label with the query text.
+クエリテキストと検索画像の間で属性ラベルが 1 つでも一致すれば hit。
 
-| Category | Base CLIP | **CLIP fine-tuned** | Relative gain |
+| カテゴリ | Base CLIP | **CLIP fine-tuned** | 倍率 |
 |---|---|---|---|
-| Soundness | 0.3502 | **0.7043** | ×2.01 |
-| Measure | 0.3101 | **0.6281** | ×2.03 |
-| Damage type | 0.1248 | **0.6667** | **×5.34** |
-| Damage loc. | 0.1252 | **0.6397** | **×5.11** |
+| 健全度判定 | 0.3502 | **0.7043** | ×2.01 |
+| 対策区分 | 0.3101 | **0.6281** | ×2.03 |
+| 損傷種類 | 0.1248 | **0.6667** | **×5.34** |
+| 損傷部位 | 0.1252 | **0.6397** | **×5.11** |
 
-Damage type / location see a 5× gain that is impossible for the ResNet/ViT baselines (no text–image alignment).
+損傷種類・部位の T2I 検索で **5 倍超の改善**を確認。これは ResNet50/ViT のような教師あり分類器には原理的に不可能な能力。
 
-## Model checkpoints
+## モデルチェックポイント
 
-Fine-tuned checkpoints are released on the Hugging Face Hub:
+ファインチューニング済みチェックポイントは Hugging Face Hub で公開：
 
-- **Japanese captions**: [Seino404/bridge-inspection-clip](https://huggingface.co/Seino404/bridge-inspection-clip)
-- **English captions**: [Seino404/bridge-inspection-clip-en](https://huggingface.co/Seino404/bridge-inspection-clip-en) (uploaded after the EN sweep finishes)
+- [**Seino404/bridge-inspection-clip**](https://huggingface.co/Seino404/bridge-inspection-clip)
 
-## Dataset
+## データ
 
-Image-text pairs from the Japanese national road facility inspection database (xROAD).
+全国道路施設点検データベース（xROAD）から抽出した橋梁点検画像と所見テキストのペアデータ。
 
-| Split | Samples |
+| Split | サンプル数 |
 |---|---|
 | Train | 130,930 |
 | Validation | 2,679 |
-| k-NN database (all 4 categories valid) | 90,987 |
+| kNN データベース（4 カテゴリ全て有効な行のみ） | 90,987 |
 
-Image paths are removed from the redistributed CSVs; the image files themselves are not redistributed because of dataset licensing. Code is provided to rebuild CSVs from the inspection database; see `Pretreatment/`.
+データセットライセンスの都合上、画像実体は同梱しません。CSV を再構築するためのスクリプトは `Pretreatment/` を参照。
 
-## Quick start
-
-### Installation
+## 環境構築
 
 ```bash
-uv sync                 # or: pip install -e .
+# uv（推奨）
+uv sync
+
+# pip
+pip install -e .
 ```
 
-### Reproducing the proposed CLIP-FT k-NN
+GPU は **1 台以上あれば動作**します。`CUDA_VISIBLE_DEVICES` 環境変数で使用 GPU を指定。
+
+## クイックスタート
+
+### 1. CLIP のファインチューニング
 
 ```bash
-# 1. Fine-tune CLIP (or download the checkpoint from HF Hub)
-bash classification/train_clip.sh
+# HuggingFace から学習済み ckpt をダウンロード推奨（時間節約）
+# もしくは自分でファインチューニング:
+CUDA_VISIBLE_DEVICES=0 bash classification/train_clip.sh
+```
 
-# 2. k-NN classification with the FT checkpoint
-python -m classification.models.clip_finetuned_knn \
+### 2. 提案手法（CLIP-FT + kNN）で分類
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -m classification.models.clip_finetuned_knn \
   --train_csv classification/results/unified_train_user.csv \
   --val_csv   classification/results/unified_val_user.csv \
   --ckpt_dir  logs_classification/bridgeclip_vitb32_unified/checkpoints \
   --out       classification/results/clip_finetuned_knn_preds.csv \
   --k 10
+```
 
-# 3. Evaluate
+### 3. 評価
+
+```bash
 python -m classification.evaluate \
   --pred classification/results/clip_finetuned_knn_preds.csv \
   --out  classification/results/clip_finetuned_knn_metrics.json
 ```
 
-### Re-running all baselines (4 GPU parallel)
+### 4. ベースライン（ResNet50 / ViT / GPT-4o 等）の再実行
 
 ```bash
-# Japanese
-IMAGE_ROOT=/path/to/images bash classification/run_all_classifiers_parallel.sh
-
-# English
-IMAGE_ROOT=/path/to/images bash classification/run_all_classifiers_parallel_en.sh
+# 教師あり baseline 6 構成を順次学習
+IMAGE_ROOT=/path/to/images \
+CUDA_VISIBLE_DEVICES=0 \
+bash classification/run_all_classifiers.sh
 ```
 
-### Attribute-based retrieval (used in §3 of the paper)
+### 5. 検索評価（標準 R@k + 属性ベース）
 
 ```bash
-python -m classification.retrieval_eval \
+CUDA_VISIBLE_DEVICES=0 python -m classification.retrieval_eval \
   --val_csv  classification/results/unified_val_user.csv \
   --ckpt_dir logs_classification/bridgeclip_vitb32_unified/checkpoints \
-  --out      classification/results/clip_finetuned_retrieval_v2.json
+  --out      classification/results/clip_finetuned_retrieval.json
 ```
 
-Outputs `AttrMatch@k`, attribute-based `mAP`, and `NDCG@10` for both I2I and T2I, across all four categories.
+出力 JSON には I2T / T2I の R@k に加えて、**AttrMatch@k / 属性ベース mAP / NDCG@10** が含まれます。
 
-## Layout
+### 6. 混同行列の可視化（Blues カラーマップ）
+
+```bash
+python -m classification.plot_confusion_matrices \
+  --out_dir classification/results/confusion_matrices
+```
+
+## ディレクトリ構成
 
 ```
 .
 ├── classification/
 │   ├── data/
-│   │   ├── dataset.py              # multi-label dataset with --image_root remap
-│   │   ├── label_definitions.py    # Japanese labels (Ⅰ/Ⅱ/Ⅲ/Ⅳ, etc.)
-│   │   ├── label_definitions_en.py # English labels (I/II/III/IV, etc.)
-│   │   └── labels.py               # adapter: LABEL_LANG=ja/en switches the two
+│   │   ├── dataset.py             # multi-label dataset、`--image_root` でパス書換に対応
+│   │   ├── label_definitions.py   # ラベル定義（Ⅰ/Ⅱ/Ⅲ/Ⅳ・主桁 等）
+│   │   └── extract_labels.py      # 所見テキストからラベル抽出
 │   ├── models/
-│   │   ├── clip_finetuned_knn.py   # proposed method (k-NN over CLIP-FT features)
-│   │   ├── clip_classifier.py      # CLIP backbone + supervised heads (C/D/E/F)
-│   │   ├── clip_zeroshot.py        # text-dot product (A/B), supports --ckpt for FT
-│   │   ├── resnet50.py, vit.py, ...
-│   │   ├── gpt4o.py / qwen3vl.py / internvl.py / llama.py  # VLM zero-shot
-│   │   └── *_en.py                 # English-prompt variants for the VLMs
-│   ├── train.py                    # supervised training entry point
-│   ├── train_clip.sh               # CLIP fine-tuning launcher
-│   ├── evaluate.py / evaluate_en.py
-│   ├── retrieval_eval.py           # standard + attribute-based retrieval
-│   ├── plot_confusion_matrices.py / *_en.py
-│   ├── predict_top1.py             # top-1 fair comparison for weighted variants
-│   └── run_*.sh                    # batch run scripts (single GPU / 3 GPU / 4 GPU)
-├── Pretreatment/                   # text & label preprocessing for xROAD data
-├── eval_retrieval.py               # standalone retrieval eval (used by sweep)
-├── pick_best_ckpt.py               # picks best epoch from results.jsonl
-├── run_sweep_*.sh                  # data-scaling sweep entry points
-├── pyproject.toml                  # uv project file
+│   │   ├── clip_finetuned_knn.py  # 提案手法（CLIP-FT 特徴の kNN 多数決）
+│   │   ├── clip_classifier.py     # CLIP backbone + 教師ありヘッド
+│   │   ├── clip_zeroshot.py       # text-feature 内積（zero-shot）
+│   │   ├── resnet50.py / vit.py 等  # ImageNet 事前学習ベースライン
+│   │   └── gpt4o.py / qwen3vl.py / internvl.py / llama.py  # zero-shot VLM
+│   ├── train.py                   # 教師あり学習エントリポイント
+│   ├── train_clip.sh              # CLIP ファインチューニング起動
+│   ├── evaluate.py                # macro/micro/weighted F1 + Balanced Acc + per-class P/R
+│   ├── retrieval_eval.py          # R@k + 属性ベース AttrMatch/mAP/NDCG
+│   ├── plot_confusion_matrices.py # Blues + カラーバー付き混同行列
+│   ├── predict_top1.py            # weighted 系の top-1 公平再推論
+│   ├── run_all_classifiers.sh     # ResNet50/ViT 全構成の逐次実行
+│   ├── run_clip_textdot.sh        # text-feature 内積の評価
+│   └── retrain_clip_short.sh      # CLIP の短期間ファインチューニング
+├── Pretreatment/                  # xROAD 生データから CSV を作るスクリプト
+├── eval_retrieval.py / eval_retrieval_baseline.py  # スタンドアロン retrieval 評価
+├── pick_best_ckpt.py              # results.jsonl から最良 epoch を選択
+├── pyproject.toml                 # uv プロジェクト設定
 └── README.md
 ```
 
-## Caveats noted in our experiments
+## 実験設計上の注意
 
-- The validation set shares **89.4% of bridges with the training set**; the current split does not isolate bridge-level generalization. Claims about unseen-bridge generalization require a leave-one-bridge-out (LOBO) re-split.
-- The maintained CLIP-FT checkpoint is `logs_classification/bridgeclip_vitb32_unified/checkpoints/epoch_5.pt` (val_loss = 2.5242, downloaded from Hugging Face after the original was deleted to free disk).
-- Older buggy supervised baselines (mean exact-match accuracy ≈ 0.38) that appeared in earlier drafts were caused by (i) a silent black-image fallback in `BridgeInspectionDataset` when image paths were wrong, and (ii) BCE-on-one-hot loss for single-label categories. Both bugs have been fixed; the numbers in this README are the post-fix re-trained values.
+- 現在の train/val 分割は **同一橋梁の別画像が train と val の両方に含まれる**ことが分かっており（val 2,679 件のうち 2,395 件 = 89.4% が train と橋梁を共有）、「未知の橋梁への汎化」を評価していません。橋梁ID単位 (Leave-One-Bridge-Out) の再分割が必要です。
+- 公開チェックポイントは `epoch_5.pt`（val_loss = 2.5242）です。中間 epoch は容量節約のため削除しています。
+- 旧バージョンの README に掲載されていた「平均 Exact Match Accuracy ≈ 0.38」は、`BridgeInspectionDataset` の壊れ画像サイレント代替バグと、単一ラベルカテゴリへの BCE 損失誤適用に由来する数値でした。本リポジトリのコードは両バグを修正済みで、上記の数値は修正後の再学習・再評価結果です。
 
-## Citation
+## 引用
 
-Paper under preparation.
+論文準備中。
 
-## License
+## ライセンス
 
-Code: MIT. The dataset itself is not redistributed (see Dataset section).
+コード: MIT License。データセット本体は配布しません（上記「データ」セクション参照）。

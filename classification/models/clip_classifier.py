@@ -27,7 +27,7 @@ import open_clip
 import torch
 import torch.nn as nn
 
-from classification.data.labels import NUM_CLASSES
+from classification.data.label_definitions import NUM_CLASSES
 
 
 def _find_best_ckpt(ckpt_dir: str) -> str:

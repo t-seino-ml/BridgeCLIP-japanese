@@ -4,7 +4,7 @@
 # 目的: 削除された epoch 5 best モデルを復元する。
 # 既存 `bridgeclip_vitb32_unified` は触らず、別 name で出力する。
 #
-# 出力: ~/Flash_Storage/CLIP/logs_classification/bridgeclip_vitb32_unified_v2/
+# 出力: logs_classification/bridgeclip_vitb32_unified_v2/
 #         checkpoints/epoch_1..10.pt
 #         checkpoints/results.jsonl
 #
@@ -16,8 +16,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 
-# GPU 選択（既定: GPU 3）
-GPU="${GPU:-3}"
+# GPU 選択（既定: GPU 0、CUDA_VISIBLE_DEVICES と等価）
+GPU="${GPU:-0}"
 NAME="${NAME:-bridgeclip_vitb32_unified_v2}"
 EPOCHS="${EPOCHS:-10}"
 

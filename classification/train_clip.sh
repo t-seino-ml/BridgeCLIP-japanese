@@ -1,5 +1,5 @@
 #!/bin/bash
-# ファインチューニングCLIP 学習スクリプト（GPU3使用）
+# ファインチューニングCLIP 学習スクリプト（GPU は CUDA_VISIBLE_DEVICES で指定、デフォルト 0）
 # unified_train_local.csv / unified_val_local.csv を使用
 #
 # 使い方:
@@ -8,7 +8,7 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 
-CUDA_VISIBLE_DEVICES=3 uv run python -m open_clip_train.main \
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" uv run python -m open_clip_train.main \
   --train-data "${ROOT_DIR}/classification/results/unified_train_user.csv" \
   --val-data   "${ROOT_DIR}/classification/results/unified_val_user.csv" \
   --dataset-type csv \
