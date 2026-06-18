@@ -193,9 +193,7 @@ python -m classification.plot_confusion_matrices \
 
 ## 実験設計上の注意
 
-- 現在の train/val 分割は **同一橋梁の別画像が train と val の両方に含まれる**ことが分かっており（val 2,679 件のうち 2,395 件 = 89.4% が train と橋梁を共有）、「未知の橋梁への汎化」を評価していません。橋梁ID単位 (Leave-One-Bridge-Out) の再分割が必要です。
 - 公開チェックポイントは `epoch_5.pt`（val_loss = 2.5242）です。中間 epoch は容量節約のため削除しています。
-- 旧バージョンの README に掲載されていた「平均 Exact Match Accuracy ≈ 0.38」は、`BridgeInspectionDataset` の壊れ画像サイレント代替バグと、単一ラベルカテゴリへの BCE 損失誤適用に由来する数値でした。本リポジトリのコードは両バグを修正済みで、上記の数値は修正後の再学習・再評価結果です。
 
 ## 引用
 
