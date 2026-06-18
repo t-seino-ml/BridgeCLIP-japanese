@@ -38,6 +38,11 @@ MODELS = [
         "key":  "clip_finetuned_knn",
     },
     {
+        "name": "CLIP fine-tuned\n+ linear classifier",
+        "csv":  "classification/results/clip_ft_linear_probe_preds.csv",
+        "key":  "clip_ft_linear_probe",
+    },
+    {
         "name": "CLIP base kNN\n(k=10)",
         "csv":  "classification/results/clip_base_knn_preds.csv",
         "key":  "clip_base_knn",
@@ -145,7 +150,12 @@ def build_multilabel_cooccurrence(
 
 
 def load_and_filter(csv_path: str, cat: str, valid_labels: list[str]) -> tuple[list, list]:
-    """CSVを読み込み、valid フィルタおよび正規ラベル外の予測を除外して true/pred リストを返す。"""
+    """CSVを読み込み、valid フィルタおよび正規ラベル外の予測を除外して true/pred リストを返す。
+
+    予測が正規ラベル外（例：Llama の空文字 "JSON出力失敗" 等）の行は **除外** する。
+    結果として全モデルで confusion matrix の列数が同じ（valid_labels の長さ）になる。
+    除外件数は呼び出し元で必要なら別途確認すること。
+    """
     df = pd.read_csv(csv_path)
     valid_col = f"{cat}_valid"
     if valid_col in df.columns:
@@ -153,13 +163,11 @@ def load_and_filter(csv_path: str, cat: str, valid_labels: list[str]) -> tuple[l
     df = df.dropna(subset=[cat, f"pred_{cat}"])
     df[cat]           = df[cat].astype(str).str.strip()
     df[f"pred_{cat}"] = df[f"pred_{cat}"].astype(str).str.strip()
-    # 正解ラベルが正規ラベルに含まれる行のみ（ground truth の表記ゆれ対策）
-    df = df[df[cat].isin(valid_labels)]
-    # 予測ラベルが正規ラベル外の場合は "その他(未定義)" に統一
+    # 正解ラベルが正規ラベル内の行のみ（ground truth の表記ゆれ対策）
     valid_set = set(valid_labels)
-    df[f"pred_{cat}"] = df[f"pred_{cat}"].apply(
-        lambda x: x if x in valid_set else "(未定義)"
-    )
+    df = df[df[cat].isin(valid_set)]
+    # 予測ラベルが正規ラベル外の行は除外（"(未定義)" を作らない）
+    df = df[df[f"pred_{cat}"].isin(valid_set)]
     y_true = df[cat].tolist()
     y_pred = df[f"pred_{cat}"].tolist()
     return y_true, y_pred
@@ -218,11 +226,8 @@ def run(out_dir: str):
         # ── 健全度判定 ──
         try:
             y_true, y_pred = load_and_filter(csv_path, "kenzenudo", KENZENUDO_ORDER)
-            # ラベルを順序固定（存在するもののみ、未定義列も末尾に追加）
-            present = set(y_true + y_pred)
-            labels = [l for l in KENZENUDO_ORDER if l in present]
-            if "(未定義)" in present:
-                labels.append("(未定義)")
+            # 全モデル共通：正規 4 ラベルを必ず全て表示（未予測クラスは 0 行/列で表示される）
+            labels = list(KENZENUDO_ORDER)
             cm = confusion_matrix(y_true, y_pred, labels=labels)
             acc = np.diag(cm).sum() / cm.sum() if cm.sum() > 0 else 0.0
             plot_confusion_matrix(
@@ -238,10 +243,8 @@ def run(out_dir: str):
         # ── 対策区分 ──
         try:
             y_true, y_pred = load_and_filter(csv_path, "taisaku", TAISAKU_ORDER)
-            present = set(y_true + y_pred)
-            labels = [l for l in TAISAKU_ORDER if l in present]
-            if "(未定義)" in present:
-                labels.append("(未定義)")
+            # 全モデル共通：正規 9 ラベルを必ず全て表示
+            labels = list(TAISAKU_ORDER)
             cm = confusion_matrix(y_true, y_pred, labels=labels)
             acc = np.diag(cm).sum() / cm.sum() if cm.sum() > 0 else 0.0
             # 対策区分はラベル数が多いので横長に
@@ -260,8 +263,8 @@ def run(out_dir: str):
         try:
             y_true, y_pred = load_multilabel(csv_path, "damage_type", DAMAGE_TYPE_ORDER)
             if y_true:
-                present = set(l for ls in y_true + y_pred for l in ls)
-                labels = [l for l in DAMAGE_TYPE_ORDER if l in present]
+                # 全モデル共通：正規 15 ラベルを必ず全て表示
+                labels = list(DAMAGE_TYPE_ORDER)
                 cm = build_multilabel_cooccurrence(y_true, y_pred, labels)
                 # 対角成分の割合を accuracy 代わりに表示（各正解クラスのヒット率の平均）
                 row_sum = cm.sum(axis=1).clip(min=1)
@@ -273,7 +276,7 @@ def run(out_dir: str):
                     out_path=out_path / "damage_type" / f"{model_key}.png",
                     accuracy=acc,
                     figsize=(fw, fw * 0.9),
-                    cmap="YlOrRd",
+                    cmap="Blues",
                 )
         except Exception as e:
             print(f"  [損傷種類] エラー: {e}")
@@ -282,8 +285,8 @@ def run(out_dir: str):
         try:
             y_true, y_pred = load_multilabel(csv_path, "damage_loc", DAMAGE_LOC_ORDER)
             if y_true:
-                present = set(l for ls in y_true + y_pred for l in ls)
-                labels = [l for l in DAMAGE_LOC_ORDER if l in present]
+                # 全モデル共通：正規 20 ラベルを必ず全て表示
+                labels = list(DAMAGE_LOC_ORDER)
                 cm = build_multilabel_cooccurrence(y_true, y_pred, labels)
                 row_sum = cm.sum(axis=1).clip(min=1)
                 acc = np.mean(np.diag(cm) / row_sum)
@@ -294,7 +297,7 @@ def run(out_dir: str):
                     out_path=out_path / "damage_loc" / f"{model_key}.png",
                     accuracy=acc,
                     figsize=(fw, fw * 0.9),
-                    cmap="YlOrRd",
+                    cmap="Blues",
                 )
         except Exception as e:
             print(f"  [損傷部位] エラー: {e}")

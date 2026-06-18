@@ -27,10 +27,32 @@ import torch.nn.functional as F
 from PIL import Image
 from tqdm import tqdm
 
-from classification.data.label_definitions import ALL_LABEL_SETS
-from classification.prompts import CLIP_TEMPLATES
+from classification.data.labels import ALL_LABEL_SETS
+from classification.prompts_unified import CLIP_TEMPLATES
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def _find_best_checkpoint(ckpt_dir: str) -> str:
+    """results.jsonl を val_loss 昇順に並べ、実在する最初の ckpt を返す。"""
+    p = Path(ckpt_dir)
+    results_file = p / "results.jsonl"
+    if not results_file.exists():
+        raise FileNotFoundError(f"results.jsonl が見つかりません: {results_file}")
+    entries: list[tuple[float, int]] = []
+    with open(results_file) as f:
+        for line in f:
+            d = json.loads(line)
+            loss = d.get("clip_val_loss", float("inf"))
+            epoch = d.get("epoch", -1)
+            entries.append((loss, epoch))
+    entries.sort()
+    for loss, epoch in entries:
+        candidate = p / f"epoch_{epoch}.pt"
+        if candidate.exists():
+            print(f"[CLIP] 採用: epoch {epoch} (val_loss={loss:.4f})")
+            return str(candidate)
+    raise FileNotFoundError(f"実在する ckpt が一つもありません: {ckpt_dir}")
 
 
 class CLIPZeroShotClassifier:
@@ -50,15 +72,30 @@ class CLIPZeroShotClassifier:
         pretrained: str = "laion2b_s34b_b79k",
         threshold: float = 0.3,
         device: str = DEVICE,
+        ckpt_path: str | None = None,
+        ckpt_dir: str | None = None,
     ):
         self.threshold = threshold
         self.device = device
+
+        # ckpt_dir 指定時は results.jsonl から best (val_loss 最小・実在する ckpt) を選択
+        if ckpt_dir is not None:
+            ckpt_path = _find_best_checkpoint(ckpt_dir)
 
         print(f"[CLIP] モデルを読み込み中: {model_name} ({pretrained})")
         self.model, _, self.preprocess = open_clip.create_model_and_transforms(
             model_name, pretrained=pretrained, device=device
         )
         self.tokenizer = open_clip.get_tokenizer(model_name)
+
+        if ckpt_path is not None:
+            print(f"[CLIP] FT チェックポイントを読み込み中: {ckpt_path}")
+            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+            sd = ckpt.get("state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
+            sd = {k.replace("module.", ""): v for k, v in sd.items()}
+            self.model.load_state_dict(sd, strict=False)
+            print("[CLIP] FT チェックポイント読み込み完了")
+
         self.model.eval()
 
         # クラステキスト埋め込みを事前計算
@@ -155,16 +192,26 @@ def run_on_csv(
     pretrained: str = "laion2b_s34b_b79k",
     batch_size: int = 64,
     threshold: float = 0.3,
+    ckpt_path: str | None = None,
+    ckpt_dir: str | None = None,
+    image_root: str | None = None,
 ) -> None:
     """
     ラベル付きCSVの全画像に対してゼロショット分類を実行し、結果をCSVに保存する。
+    `ckpt_path` / `ckpt_dir` を指定すると CLIP-FT ckpt を読み込んで推論する。
+    `image_root` を指定すると CSV の image 列のディレクトリ部分を差し替える。
     """
     import pandas as pd
 
     df = pd.read_csv(csv_path)
+    if image_root is not None:
+        df = df.copy()
+        df["image"] = df["image"].map(lambda p: str(Path(image_root) / Path(p).name))
+
     classifier = CLIPZeroShotClassifier(
         model_name=model_name, pretrained=pretrained,
         threshold=threshold,
+        ckpt_path=ckpt_path, ckpt_dir=ckpt_dir,
     )
 
     all_preds: list[dict] = []
@@ -185,8 +232,10 @@ def run_on_csv(
     for _, row in tqdm(df.iterrows(), total=len(df), desc="CLIP ゼロショット推論"):
         try:
             img = Image.open(str(row["image"])).convert("RGB")
-        except Exception:
-            img = Image.fromarray(np.zeros((224, 224, 3), dtype=np.uint8))
+        except Exception as e:
+            raise FileNotFoundError(
+                f"画像が読み込めません: {row['image']} ({e}) — `--image_root` か CSV パスを確認してください。"
+            ) from e
         images.append(img)
         img_paths.append(str(row["image"]))
 
@@ -207,13 +256,16 @@ def run_on_csv(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="CLIP ゼロショット分類")
+    parser = argparse.ArgumentParser(description="CLIP ゼロショット分類（FT ckpt 対応）")
     parser.add_argument("--csv",        required=True, help="ラベル付きCSVのパス")
     parser.add_argument("--out",        required=True, help="予測結果の出力CSVパス")
     parser.add_argument("--model",      default="ViT-B-32")
     parser.add_argument("--pretrained", default="laion2b_s34b_b79k")
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--threshold",  type=float, default=0.3)
+    parser.add_argument("--ckpt",       default=None, help="CLIP-FT ckpt パス（省略時はベースCLIP）")
+    parser.add_argument("--ckpt_dir",   default=None, help="ckpt ディレクトリ。results.jsonl から best を自動採用")
+    parser.add_argument("--image_root", default=None, help="CSV の image 列のディレクトリ部分を差し替え")
     args = parser.parse_args()
 
     run_on_csv(
@@ -223,6 +275,9 @@ def main():
         pretrained=args.pretrained,
         batch_size=args.batch_size,
         threshold=args.threshold,
+        ckpt_path=args.ckpt,
+        ckpt_dir=args.ckpt_dir,
+        image_root=args.image_root,
     )
 
 

@@ -19,7 +19,7 @@ import torch.nn as nn
 from torchvision import models
 from torchvision.models import ViT_B_16_Weights
 
-from classification.data.label_definitions import NUM_CLASSES
+from classification.data.labels import NUM_CLASSES
 
 
 class ViTMultiLabel(nn.Module):

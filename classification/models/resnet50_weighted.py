@@ -14,7 +14,7 @@ import torch.nn as nn
 import pandas as pd
 import numpy as np
 
-from classification.data.label_definitions import ALL_LABEL_SETS, NUM_CLASSES
+from classification.data.labels import ALL_LABEL_SETS, NUM_CLASSES
 from classification.models.resnet50 import ResNet50MultiLabel
 
 

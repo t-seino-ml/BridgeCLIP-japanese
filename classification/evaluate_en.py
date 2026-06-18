@@ -1,27 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-分類結果の評価スクリプト
+Evaluation script for English-labeled classification predictions.
 
-モデルが出力した予測CSV（pred_kenzenudo, pred_taisaku, etc.）と
-正解ラベル（kenzenudo, taisaku, etc.）を比較し、メトリクスを計算する。
+Parallel to evaluate.py. Uses ALL_LABEL_SETS from label_definitions_en,
+so canonical labels are the English ones (I/II/III/IV, main girder, etc.).
 
-対応メトリクス:
-  - Accuracy（健全度・対策区分の単一ラベル向け）
-  - Macro-F1
-  - Micro-F1
-  - Weighted-F1
-  - mAP（mean Average Precision）
+Usage:
+    # single model
+    python -m classification.evaluate_en \
+        --pred classification/results/gpt4o_en_preds.csv \
+        --out  classification/results/gpt4o_en_metrics.json
 
-使い方:
-    # 単一モデルの評価
-    python -m classification.evaluate \
-        --pred classification/results/clip_zeroshot_preds.csv \
-        --out  classification/results/clip_zeroshot_metrics.json
-
-    # 全モデルの一括比較
-    python -m classification.evaluate \
+    # compare all *_preds.csv in a dir
+    python -m classification.evaluate_en \
         --compare_dir classification/results \
-        --out         classification/results/comparison.json
+        --out         classification/results/comparison_en.json
 """
 
 from __future__ import annotations
@@ -33,23 +26,17 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.metrics import (
-    accuracy_score,
     average_precision_score,
     balanced_accuracy_score,
-    classification_report,
     f1_score,
     precision_score,
     recall_score,
 )
 
-from classification.data.label_definitions import ALL_LABEL_SETS
+from classification.data.label_definitions_en import ALL_LABEL_SETS
 
-# ────────────────────────────── ユーティリティ ───────────────────────────────────
 
 def _parse_labels(series: pd.Series, label_list: list[str]) -> np.ndarray:
-    """
-    "|" 区切りのラベル文字列をマルチホット行列 (N, C) に変換する。
-    """
     label2idx = {lbl: i for i, lbl in enumerate(label_list)}
     matrix = np.zeros((len(series), len(label_list)), dtype=np.float32)
     for i, val in enumerate(series):
@@ -61,56 +48,39 @@ def _parse_labels(series: pd.Series, label_list: list[str]) -> np.ndarray:
 
 
 def evaluate_model(pred_csv: str) -> dict:
-    """
-    1モデルの予測CSVを読み込み、全カテゴリのメトリクスを計算して返す。
-
-    入力CSVの期待カラム:
-        kenzenudo, taisaku, damage_type, damage_loc   (正解)
-        pred_kenzenudo, pred_taisaku, pred_damage_type, pred_damage_loc (予測)
-    """
     df = pd.read_csv(pred_csv)
     results: dict[str, dict] = {}
 
     for cat, label_list in ALL_LABEL_SETS.items():
         gt_col   = cat
         pred_col = f"pred_{cat}"
-
         if gt_col not in df.columns or pred_col not in df.columns:
-            print(f"  [スキップ] カラムが見つかりません: {gt_col} / {pred_col}")
+            print(f"  [skip] column not found: {gt_col} / {pred_col}")
             continue
 
-        # 正解・予測をマルチホット行列に変換
         y_true = _parse_labels(df[gt_col],   label_list)
         y_pred = _parse_labels(df[pred_col], label_list)
 
-        # 有効行のみ（正解が1件以上ある行）
         valid_mask = y_true.sum(axis=1) > 0
         if valid_mask.sum() == 0:
-            print(f"  [スキップ] 有効な正解ラベルがありません: {cat}")
+            print(f"  [skip] no valid GT labels for: {cat}")
             continue
 
         y_true_v = y_true[valid_mask]
         y_pred_v = y_pred[valid_mask]
 
-        # ── メトリクス計算 ──
-        cat_metrics: dict[str, float] = {}
-
-        # Accuracy（完全一致）
+        cat_metrics: dict = {}
         exact_match = (y_true_v == y_pred_v).all(axis=1).mean()
         cat_metrics["exact_match_accuracy"] = float(exact_match)
-
-        # F1（各閾値 0.5 のマルチホット）
         cat_metrics["macro_f1"]    = float(f1_score(y_true_v, y_pred_v, average="macro",    zero_division=0))
         cat_metrics["micro_f1"]    = float(f1_score(y_true_v, y_pred_v, average="micro",    zero_division=0))
         cat_metrics["weighted_f1"] = float(f1_score(y_true_v, y_pred_v, average="weighted", zero_division=0))
 
-        # Precision / Recall（macro / weighted）
         cat_metrics["macro_precision"]    = float(precision_score(y_true_v, y_pred_v, average="macro",    zero_division=0))
         cat_metrics["macro_recall"]       = float(recall_score(   y_true_v, y_pred_v, average="macro",    zero_division=0))
         cat_metrics["weighted_precision"] = float(precision_score(y_true_v, y_pred_v, average="weighted", zero_division=0))
         cat_metrics["weighted_recall"]    = float(recall_score(   y_true_v, y_pred_v, average="weighted", zero_division=0))
 
-        # Balanced Accuracy（単一ラベル系のみ意味がある）
         if cat in ("kenzenudo", "taisaku"):
             y_true_idx = y_true_v.argmax(axis=1)
             y_pred_active = y_pred_v.sum(axis=1) > 0
@@ -122,7 +92,6 @@ def evaluate_model(pred_csv: str) -> dict:
             except Exception:
                 cat_metrics["balanced_accuracy"] = None
 
-        # mAP（有効クラスのみ）
         valid_classes = y_true_v.sum(axis=0) > 0
         if valid_classes.sum() > 0:
             try:
@@ -135,10 +104,9 @@ def evaluate_model(pred_csv: str) -> dict:
             except Exception:
                 cat_metrics["mAP"] = None
 
-        # クラス別 Precision / Recall / F1
-        per_class_p = precision_score(y_true_v, y_pred_v, average=None, zero_division=0)
-        per_class_r = recall_score(   y_true_v, y_pred_v, average=None, zero_division=0)
-        per_class_f1 = f1_score(      y_true_v, y_pred_v, average=None, zero_division=0)
+        per_class_p  = precision_score(y_true_v, y_pred_v, average=None, zero_division=0)
+        per_class_r  = recall_score(   y_true_v, y_pred_v, average=None, zero_division=0)
+        per_class_f1 = f1_score(       y_true_v, y_pred_v, average=None, zero_division=0)
         per_class_support = y_true_v.sum(axis=0).astype(int)
         cat_metrics["per_class"] = {
             label_list[i]: {
@@ -149,58 +117,47 @@ def evaluate_model(pred_csv: str) -> dict:
             }
             for i in range(len(label_list))
         }
-        # 後方互換
         cat_metrics["per_class_f1"] = {
             label_list[i]: round(float(per_class_f1[i]), 4)
             for i in range(len(label_list))
         }
-
-        # サンプル数
         cat_metrics["n_samples"] = int(valid_mask.sum())
-
         results[cat] = cat_metrics
 
-    # 全カテゴリの平均 macro-F1
     macro_f1_values = [v["macro_f1"] for v in results.values() if "macro_f1" in v]
     results["overall"] = {
         "mean_macro_f1": float(np.mean(macro_f1_values)) if macro_f1_values else 0.0,
     }
-
     return results
 
 
 def compare_models(pred_dir: str) -> dict:
-    """
-    指定ディレクトリ内の *_preds.csv ファイルをすべて評価して比較する。
-    """
     pred_files = sorted(Path(pred_dir).glob("*_preds.csv"))
     if not pred_files:
-        print(f"*_preds.csv が見つかりません: {pred_dir}")
+        print(f"no *_preds.csv found in: {pred_dir}")
         return {}
 
     comparison: dict[str, dict] = {}
     for f in pred_files:
         model_name = f.stem.replace("_preds", "")
-        print(f"\n評価中: {model_name}")
+        print(f"\nevaluating: {model_name}")
         try:
             metrics = evaluate_model(str(f))
             comparison[model_name] = metrics
-            print(f"  全体 macro-F1: {metrics.get('overall', {}).get('mean_macro_f1', 0):.4f}")
+            print(f"  mean macro-F1: {metrics.get('overall', {}).get('mean_macro_f1', 0):.4f}")
         except Exception as e:
-            print(f"  エラー: {e}")
+            print(f"  error: {e}")
             comparison[model_name] = {"error": str(e)}
-
     return comparison
 
 
 def print_summary_table(comparison: dict) -> None:
-    """比較結果を表形式で標準出力する。"""
     print("\n" + "=" * 80)
-    print("モデル比較サマリー（macro-F1）")
+    print("Model comparison (macro-F1, English labels)")
     print("=" * 80)
 
     categories = list(ALL_LABEL_SETS.keys())
-    header = f"{'モデル':30s}" + "".join(f"  {cat:12s}" for cat in categories) + "  平均"
+    header = f"{'model':30s}" + "".join(f"  {cat:12s}" for cat in categories) + "  mean"
     print(header)
     print("-" * len(header))
 
@@ -220,10 +177,10 @@ def print_summary_table(comparison: dict) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="分類結果の評価")
-    parser.add_argument("--pred",        default=None, help="単一予測CSVのパス")
-    parser.add_argument("--out",         default=None, help="メトリクスの出力JSONパス")
-    parser.add_argument("--compare_dir", default=None, help="複数モデルを比較するディレクトリ")
+    parser = argparse.ArgumentParser(description="Evaluate classification predictions (English)")
+    parser.add_argument("--pred",        default=None, help="single prediction CSV path")
+    parser.add_argument("--out",         default=None, help="output metrics JSON path")
+    parser.add_argument("--compare_dir", default=None, help="compare multiple models in this dir")
     args = parser.parse_args()
 
     if args.compare_dir:
@@ -233,12 +190,11 @@ def main():
             Path(args.out).parent.mkdir(parents=True, exist_ok=True)
             with open(args.out, "w", encoding="utf-8") as f:
                 json.dump(results, f, ensure_ascii=False, indent=2)
-            print(f"\n結果保存: {args.out}")
+            print(f"\nsaved: {args.out}")
 
     elif args.pred:
         results = evaluate_model(args.pred)
-
-        print("\n── 評価結果 ──")
+        print("\n── evaluation ──")
         for cat, metrics in results.items():
             if cat == "overall":
                 continue
@@ -246,17 +202,16 @@ def main():
             for k, v in metrics.items():
                 if k != "per_class_f1":
                     print(f"  {k}: {v}")
-            print("  クラス別F1:")
+            print("  per-class F1:")
             for cls, f1 in (metrics.get("per_class_f1") or {}).items():
                 print(f"    {cls}: {f1:.4f}")
 
-        print(f"\n全体 mean_macro_f1: {results.get('overall', {}).get('mean_macro_f1', 0):.4f}")
-
+        print(f"\noverall mean_macro_f1: {results.get('overall', {}).get('mean_macro_f1', 0):.4f}")
         if args.out:
             Path(args.out).parent.mkdir(parents=True, exist_ok=True)
             with open(args.out, "w", encoding="utf-8") as f:
                 json.dump(results, f, ensure_ascii=False, indent=2)
-            print(f"結果保存: {args.out}")
+            print(f"saved: {args.out}")
     else:
         parser.print_help()
 

@@ -22,7 +22,7 @@ import torch.nn as nn
 from torchvision import models
 from torchvision.models import ResNet50_Weights
 
-from classification.data.label_definitions import NUM_CLASSES
+from classification.data.labels import NUM_CLASSES
 
 
 class ResNet50MultiLabel(nn.Module):

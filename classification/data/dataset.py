@@ -17,7 +17,7 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
-from classification.data.label_definitions import (
+from classification.data.labels import (
     KENZENUDO_LABELS,
     TAISAKU_LABELS,
     DAMAGE_TYPE_LABELS,
@@ -49,11 +49,25 @@ class BridgeInspectionDataset(Dataset):
         transform: Optional[Callable] = None,
         filter_valid: bool = False,
         categories: Optional[list[str]] = None,
+        image_root: Optional[str] = None,
+        strict_paths: bool = True,
     ):
+        """
+        Args (追加分):
+            image_root  : 与えると CSV の `image` 列のディレクトリ部分を全て
+                          この値に差し替える（ホスト間でCSVを共有するためのパス書換）。
+            strict_paths: True の場合、デコード不能 / 不存在画像を黒画像で代替せず
+                          例外を発生させる。学習時のサイレント崩壊を防ぐ。
+        """
         self.transform = transform
         self.categories = categories or self.CATEGORIES
+        self.image_root = image_root
+        self.strict_paths = strict_paths
 
         df = pd.read_csv(csv_path)
+        if image_root is not None:
+            df = df.copy()
+            df["image"] = df["image"].map(lambda p: str(Path(image_root) / Path(p).name))
         # 必要カラムの確認
         for col in ["image"] + self.CATEGORIES:
             assert col in df.columns, f"カラム '{col}' がCSVに存在しません"
@@ -82,8 +96,13 @@ class BridgeInspectionDataset(Dataset):
         img_path = str(row["image"])
         try:
             image = Image.open(img_path).convert("RGB")
-        except Exception:
-            # 壊れた画像は黒画像で代替（学習中はclean_csv_by_image_decodeで除去済みのはず）
+        except Exception as e:
+            if self.strict_paths:
+                # サイレントに黒画像で代替すると学習・推論が崩壊するので明示的に失敗
+                raise FileNotFoundError(
+                    f"画像が読み込めません: {img_path} ({e}) — "
+                    f"`image_root` の指定 or CSVのパスを確認してください。"
+                ) from e
             image = Image.fromarray(np.zeros((224, 224, 3), dtype=np.uint8))
 
         if self.transform is not None:

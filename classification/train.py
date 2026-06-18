@@ -51,11 +51,12 @@ from torchvision import transforms
 from tqdm import tqdm
 
 from classification.data.dataset import BridgeInspectionDataset
-from classification.data.label_definitions import ALL_LABEL_SETS
+from classification.data.labels import ALL_LABEL_SETS
 from classification.models.resnet50 import build_resnet50
 from classification.models.vit import build_vit
 from classification.models.resnet50_weighted import build_resnet50_weighted, compute_pos_weight
 from classification.models.vit_weighted import build_vit_weighted
+from classification.models.clip_classifier import build_clip_base, build_clip_ft, build_clip_ft_weighted
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -64,6 +65,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 _IMAGENET_MEAN = (0.485, 0.456, 0.406)
 _IMAGENET_STD  = (0.229, 0.224, 0.225)
 
+# ResNet50 用（ImageNet 標準）
 TRAIN_TRANSFORM = transforms.Compose([
     transforms.Resize(256),
     transforms.RandomCrop(224),
@@ -80,13 +82,27 @@ VAL_TRANSFORM = transforms.Compose([
     transforms.Normalize(_IMAGENET_MEAN, _IMAGENET_STD),
 ])
 
-# ViT は 224x224 を前提にするが、より大きいサイズの方が精度が上がることもある
+# ViT-B/16 用（torchvision の ViT_B_16_Weights.IMAGENET1K_V1 推奨設定: Resize(256)+CC(224)、ImageNet 統計）
+# 学習側は augmentation を載せる
+VIT_TRAIN_TRANSFORM = transforms.Compose([
+    transforms.Resize(256, interpolation=transforms.InterpolationMode.BILINEAR),
+    transforms.RandomCrop(224),
+    transforms.RandomHorizontalFlip(),
+    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1),
+    transforms.ToTensor(),
+    transforms.Normalize(_IMAGENET_MEAN, _IMAGENET_STD),
+])
+
 VIT_TRANSFORM = transforms.Compose([
-    transforms.Resize(248),
+    transforms.Resize(256, interpolation=transforms.InterpolationMode.BILINEAR),
     transforms.CenterCrop(224),
     transforms.ToTensor(),
     transforms.Normalize(_IMAGENET_MEAN, _IMAGENET_STD),
 ])
+
+# ── 単一ラベル系（CE）/ マルチラベル系（BCE）の分類 ──
+SINGLE_LABEL_CATS = ("kenzenudo", "taisaku")
+MULTI_LABEL_CATS  = ("damage_type", "damage_loc")
 
 
 def compute_metrics(
@@ -95,6 +111,8 @@ def compute_metrics(
 ) -> dict[str, float]:
     """
     バッチのメトリクスを計算する。
+    単一ラベル系 (kenzenudo/taisaku) は softmax + argmax、
+    マルチラベル系 (damage_type/damage_loc) は sigmoid > 0.5 で判定。
     各カテゴリの macro-F1 と全体平均を返す。
     """
     from sklearn.metrics import f1_score
@@ -103,14 +121,54 @@ def compute_metrics(
     f1_scores = []
 
     for cat in ALL_LABEL_SETS:
-        pred = (torch.sigmoid(logits[cat]) > 0.5).cpu().numpy()
-        true = labels[cat].cpu().numpy()
-        f1 = f1_score(true, pred, average="macro", zero_division=0)
+        true_mat = labels[cat].cpu().numpy()  # (B, K) マルチホット
+        if cat in SINGLE_LABEL_CATS:
+            # 単一ラベル: argmax を予測クラスとし、マルチホット相当に展開
+            pred_idx = logits[cat].argmax(dim=1).cpu().numpy()  # (B,)
+            pred = np.zeros_like(true_mat)
+            pred[np.arange(len(pred_idx)), pred_idx] = 1.0
+        else:
+            pred = (torch.sigmoid(logits[cat]) > 0.5).cpu().numpy()
+        f1 = f1_score(true_mat, pred, average="macro", zero_division=0)
         metrics[f"f1_{cat}"] = f1
         f1_scores.append(f1)
 
     metrics["f1_mean"] = float(np.mean(f1_scores))
     return metrics
+
+
+def _build_criteria(
+    device: str,
+    pos_weight: dict[str, torch.Tensor] | None,
+) -> dict[str, nn.Module]:
+    """単一ラベル系は CE、マルチラベル系は BCE を返す。pos_weight はマルチラベル側のみ適用。"""
+    criteria: dict[str, nn.Module] = {}
+    for cat in ALL_LABEL_SETS:
+        if cat in SINGLE_LABEL_CATS:
+            criteria[cat] = nn.CrossEntropyLoss()
+        else:
+            pw = pos_weight.get(cat) if pos_weight else None
+            criteria[cat] = (
+                nn.BCEWithLogitsLoss(pos_weight=pw.to(device)) if pw is not None
+                else nn.BCEWithLogitsLoss()
+            )
+    return criteria
+
+
+def _compute_loss(
+    criteria: dict[str, nn.Module],
+    logits: dict[str, torch.Tensor],
+    label_dict: dict[str, torch.Tensor],
+) -> torch.Tensor:
+    """4カテゴリの損失を合計（単一ラベル系は argmax をクラスindex化して CE）。"""
+    total = 0.0
+    for cat in ALL_LABEL_SETS:
+        if cat in SINGLE_LABEL_CATS:
+            target_idx = label_dict[cat].argmax(dim=1)
+            total = total + criteria[cat](logits[cat], target_idx)
+        else:
+            total = total + criteria[cat](logits[cat], label_dict[cat])
+    return total
 
 
 def train_one_epoch(
@@ -121,11 +179,7 @@ def train_one_epoch(
     pos_weight: dict[str, torch.Tensor] | None = None,
 ) -> dict[str, float]:
     model.train()
-    if pos_weight is not None:
-        criterion = {cat: nn.BCEWithLogitsLoss(pos_weight=pw.to(device))
-                     for cat, pw in pos_weight.items()}
-    else:
-        criterion = {cat: nn.BCEWithLogitsLoss() for cat in ALL_LABEL_SETS}
+    criterion = _build_criteria(device, pos_weight)
     total_loss = 0.0
     all_logits: dict[str, list] = {cat: [] for cat in ALL_LABEL_SETS}
     all_labels: dict[str, list] = {cat: [] for cat in ALL_LABEL_SETS}
@@ -137,8 +191,7 @@ def train_one_epoch(
         optimizer.zero_grad()
         logits = model(images)
 
-        # 4カテゴリの損失を合計
-        loss = sum(criterion[cat](logits[cat], label_dict[cat]) for cat in ALL_LABEL_SETS)
+        loss = _compute_loss(criterion, logits, label_dict)
         loss.backward()
         optimizer.step()
 
@@ -162,7 +215,7 @@ def evaluate(
     device: str,
 ) -> dict[str, float]:
     model.eval()
-    criterion = {cat: nn.BCEWithLogitsLoss() for cat in ALL_LABEL_SETS}
+    criterion = _build_criteria(device, pos_weight=None)
     total_loss = 0.0
     all_logits: dict[str, list] = {cat: [] for cat in ALL_LABEL_SETS}
     all_labels: dict[str, list] = {cat: [] for cat in ALL_LABEL_SETS}
@@ -171,7 +224,7 @@ def evaluate(
         images = images.to(device)
         label_dict_dev = {k: v.to(device) for k, v in label_dict.items()}
         logits = model(images)
-        loss = sum(criterion[cat](logits[cat], label_dict_dev[cat]) for cat in ALL_LABEL_SETS)
+        loss = _compute_loss(criterion, logits, label_dict_dev)
         total_loss += loss.item() * images.size(0)
 
         for cat in ALL_LABEL_SETS:
@@ -185,6 +238,32 @@ def evaluate(
     return metrics
 
 
+def _build_clip_transforms(model):
+    """open_clip の visual.image_size に合わせた transforms を返す。"""
+    import torchvision.transforms as T
+    img_size = getattr(model.visual, "image_size", 224)
+    if isinstance(img_size, (tuple, list)):
+        img_size = img_size[0]
+    # open_clip の標準正規化
+    MEAN = (0.48145466, 0.4578275, 0.40821073)
+    STD  = (0.26862954, 0.26130258, 0.27577711)
+    train_tf = T.Compose([
+        T.Resize(int(img_size * 1.143), interpolation=T.InterpolationMode.BICUBIC),
+        T.RandomCrop(img_size),
+        T.RandomHorizontalFlip(),
+        T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1),
+        T.ToTensor(),
+        T.Normalize(MEAN, STD),
+    ])
+    val_tf = T.Compose([
+        T.Resize(int(img_size * 1.143), interpolation=T.InterpolationMode.BICUBIC),
+        T.CenterCrop(img_size),
+        T.ToTensor(),
+        T.Normalize(MEAN, STD),
+    ])
+    return train_tf, val_tf
+
+
 def train(
     model_name: str,
     mode: str,
@@ -196,6 +275,9 @@ def train(
     batch_size: int,
     num_workers: int,
     weight_decay: float,
+    image_root: str | None = None,
+    pos_weight_clip: float = 10.0,
+    clip_ckpt_dir: str | None = None,
 ) -> None:
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
@@ -211,26 +293,49 @@ def train(
         val_tf   = VAL_TRANSFORM
     elif model_name == "vit":
         model = build_vit(mode=mode)
-        train_tf = TRAIN_TRANSFORM
+        train_tf = VIT_TRAIN_TRANSFORM
         val_tf   = VIT_TRANSFORM
     elif model_name == "vit_weighted":
         model = build_vit_weighted(mode=mode)
-        train_tf = TRAIN_TRANSFORM
+        train_tf = VIT_TRAIN_TRANSFORM
         val_tf   = VIT_TRANSFORM
+    elif model_name == "clip_base":
+        model = build_clip_base(mode=mode)
+        train_tf, val_tf = _build_clip_transforms(model)
+    elif model_name == "clip_ft":
+        model = build_clip_ft(mode=mode, ckpt_dir=clip_ckpt_dir)
+        train_tf, val_tf = _build_clip_transforms(model)
+    elif model_name == "clip_ft_weighted":
+        model = build_clip_ft_weighted(mode=mode, ckpt_dir=clip_ckpt_dir)
+        train_tf, val_tf = _build_clip_transforms(model)
     else:
-        raise ValueError(f"model は 'resnet50' / 'resnet50_weighted' / 'vit' / 'vit_weighted' を指定してください: {model_name}")
+        raise ValueError(f"未対応の model: {model_name}")
 
     model = model.to(DEVICE)
 
-    # ── pos_weight の計算（weighted モデルのみ）──
+    # ── pos_weight の計算（weighted モデルのみ・上限クリップ）──
     pos_weight = None
-    if model_name in ("resnet50_weighted", "vit_weighted"):
-        pos_weight = compute_pos_weight(train_csv, device=DEVICE)
+    if model_name in ("resnet50_weighted", "vit_weighted", "clip_ft_weighted"):
+        raw_pw = compute_pos_weight(train_csv, device=DEVICE)
+        # マルチラベル系のみ pos_weight を使う（単一ラベル系は CE なので無視される）
+        pos_weight = {}
+        for cat in MULTI_LABEL_CATS:
+            if cat in raw_pw:
+                pw = raw_pw[cat].clamp(max=pos_weight_clip)
+                pos_weight[cat] = pw
+                print(f"  pos_weight[{cat}] (clipped<= {pos_weight_clip}): "
+                      f"min={pw.min().item():.2f} max={pw.max().item():.2f} mean={pw.mean().item():.2f}")
         print(f"pos_weight を計算しました（学習CSV: {train_csv}）")
 
     # ── データセット ──
-    train_ds = BridgeInspectionDataset(train_csv, transform=train_tf, filter_valid=True)
-    val_ds   = BridgeInspectionDataset(val_csv,   transform=val_tf,   filter_valid=True)
+    train_ds = BridgeInspectionDataset(
+        train_csv, transform=train_tf, filter_valid=True,
+        image_root=image_root, strict_paths=True,
+    )
+    val_ds   = BridgeInspectionDataset(
+        val_csv,   transform=val_tf,   filter_valid=True,
+        image_root=image_root, strict_paths=True,
+    )
 
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True,
@@ -300,10 +405,14 @@ def predict_and_save(
     out_csv: str,
     batch_size: int = 64,
     num_workers: int = 4,
+    image_root: str | None = None,
+    clip_ckpt_dir: str | None = None,
 ) -> None:
     """
     学習済みチェックポイントで検証セットを推論し、予測CSVを保存する。
     evaluate.py の compare_models() でそのまま読み込める形式で出力する。
+    単一ラベル系 (kenzenudo/taisaku) は softmax + argmax、
+    マルチラベル系 (damage_type/damage_loc) は sigmoid + 閾値0.5（無検出なら argmax 補完）。
     """
     import pandas as pd
 
@@ -319,6 +428,15 @@ def predict_and_save(
     elif model_name == "vit_weighted":
         model = build_vit_weighted(mode=mode)
         val_tf = VIT_TRANSFORM
+    elif model_name == "clip_base":
+        model = build_clip_base(mode=mode)
+        _, val_tf = _build_clip_transforms(model)
+    elif model_name == "clip_ft":
+        model = build_clip_ft(mode=mode, ckpt_dir=clip_ckpt_dir)
+        _, val_tf = _build_clip_transforms(model)
+    elif model_name == "clip_ft_weighted":
+        model = build_clip_ft_weighted(mode=mode, ckpt_dir=clip_ckpt_dir)
+        _, val_tf = _build_clip_transforms(model)
     else:
         raise ValueError(f"未対応のモデル: {model_name}")
 
@@ -327,46 +445,34 @@ def predict_and_save(
     model = model.to(DEVICE).eval()
     print(f"チェックポイントを読み込みました: {ckpt_path}")
 
-    val_ds = BridgeInspectionDataset(val_csv, transform=val_tf)
+    val_ds = BridgeInspectionDataset(
+        val_csv, transform=val_tf,
+        image_root=image_root, strict_paths=True,
+    )
     val_loader = DataLoader(val_ds, batch_size=batch_size, num_workers=num_workers)
 
     source_df = pd.read_csv(val_csv)
-    pred_rows: list[dict] = []
 
+    # 全件まとめて推論
+    all_logits: dict[str, list] = {cat: [] for cat in ALL_LABEL_SETS}
     for images, _ in tqdm(val_loader, desc="推論"):
         images = images.to(DEVICE)
         logits = model(images)
         for cat in ALL_LABEL_SETS:
-            probs = torch.sigmoid(logits[cat]).cpu().numpy()
-            labels = ALL_LABEL_SETS[cat]
-            if cat == "kenzenudo" or cat == "taisaku":
-                # 単一ラベル
-                pass
-            # バッチ分を一時保存
-        # ── バッチ単位でなく全件まとめて処理する方がシンプルなので以下で実装 ──
-        break
+            all_logits[cat].append(logits[cat].cpu())
 
-    # 全件を一気に推論する実装
-    all_logits: dict[str, list] = {cat: [] for cat in ALL_LABEL_SETS}
-    for images, _ in tqdm(DataLoader(val_ds, batch_size=batch_size, num_workers=num_workers),
-                          desc="推論"):
-        images = images.to(DEVICE)
-        logits = model(images)
-        for cat in ALL_LABEL_SETS:
-            all_logits[cat].append(torch.sigmoid(logits[cat]).cpu())
-
-    merged = {cat: torch.cat(all_logits[cat]).numpy() for cat in ALL_LABEL_SETS}
-    label_sets = ALL_LABEL_SETS
+    merged_logits = {cat: torch.cat(all_logits[cat]).numpy() for cat in ALL_LABEL_SETS}
 
     rows = []
     for i in range(len(val_ds)):
         row: dict = {"image": source_df.iloc[i]["image"]}
-        for cat, labels in label_sets.items():
-            probs = merged[cat][i]
-            if cat in ("kenzenudo", "taisaku"):
-                best = labels[int(np.argmax(probs))]
-                row[f"pred_{cat}"] = best
+        for cat, labels in ALL_LABEL_SETS.items():
+            lg = merged_logits[cat][i]
+            if cat in SINGLE_LABEL_CATS:
+                # softmax 不要・logit の argmax で十分
+                row[f"pred_{cat}"] = labels[int(np.argmax(lg))]
             else:
+                probs = 1.0 / (1.0 + np.exp(-lg))
                 selected = [labels[j] for j, p in enumerate(probs) if p >= 0.5]
                 if not selected:
                     selected = [labels[int(np.argmax(probs))]]
@@ -381,8 +487,11 @@ def predict_and_save(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="ResNet50/ViT マルチラベル分類学習")
-    parser.add_argument("--model",       choices=["resnet50", "resnet50_weighted", "vit", "vit_weighted"], required=True)
+    parser = argparse.ArgumentParser(description="ResNet50/ViT/CLIP マルチラベル分類学習")
+    parser.add_argument("--model",       choices=[
+        "resnet50", "resnet50_weighted", "vit", "vit_weighted",
+        "clip_base", "clip_ft", "clip_ft_weighted",
+    ], required=True)
     parser.add_argument("--mode",        choices=["linear_probe", "finetune"], required=True)
     parser.add_argument("--train_csv",   default=None, help="学習CSVパス（--predict 時は不要）")
     parser.add_argument("--val_csv",     required=True)
@@ -392,6 +501,9 @@ def main():
     parser.add_argument("--batch_size",  type=int,   default=64)
     parser.add_argument("--num_workers", type=int,   default=4)
     parser.add_argument("--weight_decay",type=float, default=1e-4)
+    parser.add_argument("--image_root",  default=None, help="CSV の image 列のディレクトリ部分を全てこの値に差し替える（ホスト間のパス差を吸収）")
+    parser.add_argument("--pos_weight_clip", type=float, default=10.0, help="weighted 系の pos_weight 上限クリップ値")
+    parser.add_argument("--clip_ckpt_dir", default=None, help="clip_ft / clip_ft_weighted 時に best CLIP ckpt を含む dir（results.jsonl 必須）")
     # 予測モード
     parser.add_argument("--predict",  action="store_true", help="推論のみ実行（学習スキップ）")
     parser.add_argument("--ckpt",     default=None,  help="--predict 時のチェックポイントパス")
@@ -409,6 +521,8 @@ def main():
             out_csv=args.out_csv,
             batch_size=args.batch_size,
             num_workers=args.num_workers,
+            image_root=args.image_root,
+            clip_ckpt_dir=args.clip_ckpt_dir,
         )
     else:
         assert args.train_csv, "学習には --train_csv が必要です"
@@ -424,6 +538,9 @@ def main():
             batch_size=args.batch_size,
             num_workers=args.num_workers,
             weight_decay=args.weight_decay,
+            image_root=args.image_root,
+            pos_weight_clip=args.pos_weight_clip,
+            clip_ckpt_dir=args.clip_ckpt_dir,
         )
 
 

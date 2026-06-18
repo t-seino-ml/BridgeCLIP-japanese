@@ -38,7 +38,7 @@ from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from classification.data.label_definitions import ALL_LABEL_SETS
+from classification.data.labels import ALL_LABEL_SETS
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
